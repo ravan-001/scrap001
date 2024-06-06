@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify
 import subprocess
 from bs4 import BeautifulSoup
 import pandas as pd
-from mysql.connector import Error
 import time
 app = Flask(__name__)
 import time
