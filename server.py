@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify,render_template
 import subprocess
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -194,6 +194,8 @@ def scrape():
 @app.route('/ping', methods=['GET'])
 def ping():
     return "Pong!", 200
-
+@app.route('/nitin')
+def home():
+    return render_template('index.html')
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
