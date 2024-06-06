@@ -194,7 +194,7 @@ def scrape():
 @app.route('/ping', methods=['GET'])
 def ping():
     return "Pong!", 200
-@app.route('/nitin')
+@app.route('/success')
 def home():
     return render_template('index.html')
 if __name__ == '__main__':
