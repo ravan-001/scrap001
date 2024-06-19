@@ -125,7 +125,7 @@ def scrape():
             return df_json
         else:
             trial = 2
-            while:
+            while 1:
                 log("1")
                 sn = request.json.get('SN')
                 html_content = fetch_html(url)
