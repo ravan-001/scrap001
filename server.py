@@ -122,7 +122,7 @@ def scrape():
                 data.append([cin, company_name, roc, status, company_url])
             df = pd.DataFrame(data, columns=headers)
             df_json = df.to_json(orient='records')
-            return jsonify(df_json)
+            return df_json
         else:
             log("1")
             sn = request.json.get('SN')
