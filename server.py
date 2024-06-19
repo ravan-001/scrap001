@@ -124,69 +124,74 @@ def scrape():
             df_json = df.to_json(orient='records')
             return df_json
         else:
-            log("1")
-            sn = request.json.get('SN')
-            html_content = fetch_html(url)
-            dict= {}
-            dict["SN"] = sn
-            soup = BeautifulSoup(html_content, 'html.parser')
-            target_div = soup.find('h4', string="Company Details")
-            if target_div:
-                parent_div = target_div.find_parent('div', class_="col-lg-12 col-md-12 col-sm-12 col-xs-12")
-                if parent_div:
-                    table = parent_div.find('table')
-                    if table:
-                        table_data = extractCompanyDetails(table)
-                        for row in table_data:
-                            key, value = row
-                            dict[key] = value
-
-            log("2")
-
-            target_div = soup.find('h4', string=lambda text: 'Share Capital & Number of Employees' in text)
-            if target_div:
-                parent_div = target_div.find_parent('div', class_="col-lg-12 col-md-12 col-sm-12 col-xs-12")
-                if parent_div:
-                    table = parent_div.find('table')
-                    if table:
-                        table_data = extractShareCapital(table)
-                        for row in table_data:
-                            key, value = row
-                            dict[key] = value
-
-
-            target_div = soup.find('h4', string=lambda text: 'Listing and Annual Compliance Details' in text)
-            if target_div:
-                parent_div = target_div.find_parent('div', class_="col-lg-12 col-md-12 col-sm-12 col-xs-12")
-                if parent_div:
-                    table = parent_div.find('table')
-                    if table:
-                        table_data = extractAnnualCompliance(table)
-                        for row in table_data:
-                            key, value = row
-                            dict[key] = value
-                            
-            email_tag = soup.find('a', class_='__cf_email__')
-            email_data = email_tag['data-cfemail'] if email_tag else None
-            ctx = execjs.compile(js_code)
-            email_id = ctx.call("decodeEmail", email_data) if email_data else ""
-            address_tag = soup.find('p', string=lambda text: text and 'Address:' in text)
-            address = address_tag.find_next('p').get_text().strip() if address_tag else ""
-
-            dict["Email ID"] = email_id
-            dict["Address"] = address
-            dict["Url"] = url
-            rows = soup.find_all('tr', class_='accordion-toggle main-row')
-            data = []
-            for row in rows:
-                cols = row.find_all('td')
-                cols = [col.text.strip() for col in cols]
-                cols.insert(0, sn) 
-                data.append(cols[:-1])
-            df = pd.DataFrame(data, columns=['SN','DIN', 'Director_Name', 'Designation', 'Appointment_Date'])
-            df_json = df.to_dict(orient='records')
-            log("3")
-            return jsonify({"result_dict": dict, "dataframe": df_json})
+            trial = 2
+            while:
+                log("1")
+                sn = request.json.get('SN')
+                html_content = fetch_html(url)
+                dict= {}
+                dict["SN"] = sn
+                soup = BeautifulSoup(html_content, 'html.parser')
+                target_div = soup.find('h4', string="Company Details")
+                if target_div:
+                    parent_div = target_div.find_parent('div', class_="col-lg-12 col-md-12 col-sm-12 col-xs-12")
+                    if parent_div:
+                        table = parent_div.find('table')
+                        if table:
+                            table_data = extractCompanyDetails(table)
+                            for row in table_data:
+                                key, value = row
+                                dict[key] = value
+    
+                log("2")
+    
+                target_div = soup.find('h4', string=lambda text: 'Share Capital & Number of Employees' in text)
+                if target_div:
+                    parent_div = target_div.find_parent('div', class_="col-lg-12 col-md-12 col-sm-12 col-xs-12")
+                    if parent_div:
+                        table = parent_div.find('table')
+                        if table:
+                            table_data = extractShareCapital(table)
+                            for row in table_data:
+                                key, value = row
+                                dict[key] = value
+    
+    
+                target_div = soup.find('h4', string=lambda text: 'Listing and Annual Compliance Details' in text)
+                if target_div:
+                    parent_div = target_div.find_parent('div', class_="col-lg-12 col-md-12 col-sm-12 col-xs-12")
+                    if parent_div:
+                        table = parent_div.find('table')
+                        if table:
+                            table_data = extractAnnualCompliance(table)
+                            for row in table_data:
+                                key, value = row
+                                dict[key] = value
+                                
+                email_tag = soup.find('a', class_='__cf_email__')
+                email_data = email_tag['data-cfemail'] if email_tag else None
+                ctx = execjs.compile(js_code)
+                email_id = ctx.call("decodeEmail", email_data) if email_data else ""
+                address_tag = soup.find('p', string=lambda text: text and 'Address:' in text)
+                address = address_tag.find_next('p').get_text().strip() if address_tag else ""
+    
+                dict["Email ID"] = email_id
+                dict["Address"] = address
+                dict["Url"] = url
+                rows = soup.find_all('tr', class_='accordion-toggle main-row')
+                data = []
+                for row in rows:
+                    cols = row.find_all('td')
+                    cols = [col.text.strip() for col in cols]
+                    cols.insert(0, sn) 
+                    data.append(cols[:-1])
+                df = pd.DataFrame(data, columns=['SN','DIN', 'Director_Name', 'Designation', 'Appointment_Date'])
+                df_json = df.to_dict(orient='records')
+                log("3")
+                if trial == 0 or 'Company Status' in dict:
+                    return jsonify({"result_dict": dict, "dataframe": df_json})
+                else:
+                    trial = trial - 1
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
