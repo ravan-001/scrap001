@@ -97,7 +97,7 @@ def ason():
     if not url:
         return jsonify({'error': 'No URL provided'}), 400
     try:
-        trial = 2
+        trial = 4
         while 1:
             sn = request.json.get('SN')
             html_content = fetch_html(url)
@@ -114,7 +114,7 @@ def ason():
                         as_on_value = full_text.replace("As on:", "").strip()
             if as_on_value:
                 dict['As_on'] = as_on_value
-            if trial == 0 or 'As on' in dict:
+            if trial == 0 or 'As_on' in dict:
                 return jsonify(dict)
             else:
                 trial = trial - 1
