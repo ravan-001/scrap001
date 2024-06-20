@@ -90,8 +90,36 @@ def extractAnnualCompliance(table):
     return table_data
 
 
-
-    
+@app.route('/ason', methods=['POST'])
+def ason():
+    url = request.json.get('url')
+    log("0")
+    if not url:
+        return jsonify({'error': 'No URL provided'}), 400
+    try:
+        trial = 2
+        while 1:
+            sn = request.json.get('SN')
+            html_content = fetch_html(url)
+            dict= {}
+            dict["SN"] = sn
+            soup = BeautifulSoup(html_content, 'html.parser')
+            div_element = soup.find('div', style="vertical-align: bottom; float:left; width:45%;")
+            as_on_value = None
+            if div_element:
+                b_element = div_element.find('b')
+                if b_element:
+                    full_text = b_element.get_text(strip=True)
+                    if full_text.startswith("As on:"):
+                        as_on_value = full_text.replace("As on:", "").strip()
+            if as_on_value:
+                dict['As_on'] = as_on_value
+            if trial == 0 or 'As on' in dict:
+                return jsonify(dict)
+            else:
+                trial = trial - 1
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
     
 
 @app.route('/scrape', methods=['POST'])
