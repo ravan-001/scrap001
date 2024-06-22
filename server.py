@@ -237,7 +237,7 @@ def scrape():
 
 @app.route('/ping', methods=['GET'])
 def ping():
-    return "Pong!", 200
+    return "Zorojuro!", 200
 @app.route('/success')
 def home():
     return render_template('index.html')
