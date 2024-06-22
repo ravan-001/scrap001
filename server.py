@@ -151,8 +151,8 @@ def scrape():
             df = pd.DataFrame(data, columns=headers)
             df_json = df.to_json(orient='records')
             return df_json
-        else:
-            trial = 2
+        else:    
+            trial = 3
             while 1:
                 log("1")
                 sn = request.json.get('SN')
@@ -195,7 +195,19 @@ def scrape():
                             for row in table_data:
                                 key, value = row
                                 dict[key] = value
-                                
+                
+                
+                
+                Ason_element = soup.find('div', style="vertical-align: bottom; float:left; width:45%;")
+                as_on_value = None
+                if Ason_element:
+                    b_element = Ason_element.find('b')
+                    if b_element:
+                        full_text = b_element.get_text(strip=True)
+                        if full_text.startswith("As on:"):
+                            as_on_value = full_text.replace("As on:", "").strip()
+                if as_on_value:
+                    dict['As_on'] = as_on_value
                 email_tag = soup.find('a', class_='__cf_email__')
                 email_data = email_tag['data-cfemail'] if email_tag else None
                 ctx = execjs.compile(js_code)
@@ -216,7 +228,7 @@ def scrape():
                 df = pd.DataFrame(data, columns=['SN','DIN', 'Director_Name', 'Designation', 'Appointment_Date'])
                 df_json = df.to_dict(orient='records')
                 log("3")
-                if trial == 0 or 'Company Status' in dict:
+                if trial == 0 or ('Company Status' in dict and 'As_on' in dict):
                     return jsonify({"result_dict": dict, "dataframe": df_json})
                 else:
                     trial = trial - 1
