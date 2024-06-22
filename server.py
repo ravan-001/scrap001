@@ -6,7 +6,6 @@ import time
 app = Flask(__name__)
 import time
 
-
 def log(message):
     timestamp = time.strftime("%H:%M:%S %p")
     s = f"{timestamp} - {message}\n"
