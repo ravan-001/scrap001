@@ -1,243 +1,148 @@
 from flask import Flask, request, jsonify,render_template
-import subprocess
-from bs4 import BeautifulSoup
-import pandas as pd
 import time
+import requests
 app = Flask(__name__)
 import time
 
-def log(message):
-    timestamp = time.strftime("%H:%M:%S %p")
-    s = f"{timestamp} - {message}\n"
-    print(s)
-    try:
-        with open("log.txt", "a") as log_file:
-            log_file.write(s)
-    except FileNotFoundError:
-        with open("log.txt", "w") as log_file:
-            log_file.write(s)
-
-
-def fetch_html(url):
-    try:
-        result = subprocess.run(
-            ['node', 'fetchAndExtract.js', url],
-            capture_output=True, text=True, encoding='utf-8'
-        )
-        # log("Return code:", result.returncode)
-        # log("stdout:", result.stdout)
-        # log("stderr:", result.stderr)
-        
-        if result.returncode == 0:
-            return result.stdout
-        else:
-            log("Error executing the JavaScript code:", result.stderr)
-            return None
-    except Exception as e:
-
-        log("Exception occurred:", e)
-        return None
-    
-
-
-import execjs
-
-js_code = """
-function decodeEmail(encodedString) {
-    var email = '',
-        r = parseInt(encodedString.substr(0, 2), 16),
-        n, i;
-    for (n = 2; encodedString.length - n; n += 2) {
-        i = parseInt(encodedString.substr(n, 2), 16) ^ r;
-        email += String.fromCharCode(i);
+def make_api_request(url, token, max_retries=3):
+    """Helper function to make API requests with retry logic"""
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'accept': 'application/json'
     }
-    return email;
-}
-"""
-
-            
-
-
-def extractCompanyDetails(table):
-    table_data = []
-    for row in table.find_all('tr'):
-        columns = row.find_all(['td', 'th'])
-        row_data = [col.get_text(strip=True) for col in columns]
-        if row_data[0]=="Activity":
-          row_data[1]=row_data[1][:-59]
-        table_data.append(row_data)
-    return table_data
-
-def extractShareCapital(table):
-    table_data = []
-    for row in table.find_all('tr'):
-        columns = row.find_all(['td', 'th'])
-        row_data = [col.get_text(strip=True) for col in columns]
-        if row_data[1]=="Login to view":
-          continue
-        row_data[1] = ''.join([char for char in row_data[1] if char.isnumeric()])
-        table_data.append(row_data)
-    return table_data
-
-
-def extractAnnualCompliance(table):
-    table_data = []
-    for row in table.find_all('tr'):
-        columns = row.find_all(['td', 'th'])
-        row_data = [col.get_text(strip=True) for col in columns]
-        table_data.append(row_data)
-    return table_data
-
-
-@app.route('/ason', methods=['POST'])
-def ason():
-    url = request.json.get('url')
-    log("0")
-    if not url:
-        return jsonify({'error': 'No URL provided'}), 400
-    try:
-        trial = 4
-        while 1:
-            sn = request.json.get('SN')
-            html_content = fetch_html(url)
-            dict= {}
-            dict["SN"] = sn
-            soup = BeautifulSoup(html_content, 'html.parser')
-            div_element = soup.find('div', style="vertical-align: bottom; float:left; width:45%;")
-            as_on_value = None
-            if div_element:
-                b_element = div_element.find('b')
-                if b_element:
-                    full_text = b_element.get_text(strip=True)
-                    if full_text.startswith("As on:"):
-                        as_on_value = full_text.replace("As on:", "").strip()
-            if as_on_value:
-                dict['As_on'] = as_on_value
-            if trial == 0 or 'As_on' in dict:
-                return jsonify(dict)
-            else:
-                trial = trial - 1
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
     
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {'error': 404}  # Replace long error string with number
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+            # return {'error': 'Request timeout after retries'}
+            return {'error': '405'}
+        except requests.exceptions.ConnectionError:
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+            # return {'error': 'Connection error after retries'}
+            return {'error': '406'}
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+            return {'error': str(e)}
+    
+    # return {'error': 'Failed to fetch after maximum retries'}
+    return {'error': '406'}
+
+
+def get_normal_details(movie_id, token):
+    """Fetch basic movie details"""
+    try:
+        url = f'https://api.themoviedb.org/3/movie/{movie_id}?language=en-US'
+        result = make_api_request(url, token)
+        return {'normal_details': result}
+    except Exception as e:
+        return {'normal_details': {'error': str(e)}}
+    
+    # poster_path : https://image.tmdb.org/t/p/w300_and_h450_face/hMRIyBjPzxaSXWM06se3OcNjIQa.jpg
+    # backdrop_path : https://image.tmdb.org/t/p/w780/prH7Lmo7V9GuMbhCaDCSa6kvZvs.jpg
+
+
+def get_alternative_titles(movie_id, token):
+    """Fetch alternative titles"""
+    try:
+        url = f'https://api.themoviedb.org/3/movie/{movie_id}/alternative_titles'
+        result = make_api_request(url, token)
+        return {'alternative_titles': result}
+    except Exception as e:
+        return {'alternative_titles': {'error': str(e)}}
+
+
+def get_credits(movie_id, token):
+    """Fetch movie credits (cast and crew)"""
+    try:
+        url = f'https://api.themoviedb.org/3/movie/{movie_id}/credits?language=en-US'
+        result = make_api_request(url, token)
+        return {'credits': result}
+    except Exception as e:
+        return {'credits': {'error': str(e)}}
+
+
+def get_images(movie_id, token):
+    """Fetch movie images"""
+    try:
+        url = f'https://api.themoviedb.org/3/movie/{movie_id}/images'
+        result = make_api_request(url, token)
+        return {'images': result}
+    except Exception as e:
+        return {'images': {'error': str(e)}}
+
+
+def get_keywords(movie_id, token):
+    """Fetch movie keywords"""
+    try:
+        url = f'https://api.themoviedb.org/3/movie/{movie_id}/keywords'
+        result = make_api_request(url, token)
+        return {'keywords': result}
+    except Exception as e:
+        return {'keywords': {'error': str(e)}}
+
+
+def get_videos(movie_id, token):
+    """Fetch movie videos"""
+    try:
+        url = f'https://api.themoviedb.org/3/movie/{movie_id}/videos?language=en-US'
+        result = make_api_request(url, token)
+        return {'videos': result}
+    except Exception as e:
+        return {'videos': {'error': str(e)}}
+
 
 @app.route('/scrape', methods=['POST'])
 def scrape():
-    url = request.json.get('url')
-    log("0")
-    if not url:
-        return jsonify({'error': 'No URL provided'}), 400
+    """Main endpoint that combines all movie details"""
+    movie_id = request.json.get('movie_id')
+    token = request.json.get('token')
+    
+    if not movie_id:
+        return jsonify({'error': 'No movie_id provided'}), 400
+    if not token:
+        return jsonify({'error': 'No token (TMDB_API_TOKEN) provided'}), 400
+    
     try:
-        if url.startswith("https://www.zaubacorp.com/company-list/"):
-            html_content = fetch_html(url)
-            soup = BeautifulSoup(html_content, 'html.parser')
-            tbody = soup.find('table', {'id': 'table'})
-            if tbody is None:
-                raise ValueError("No tbody found in table")
-            rows = tbody.find_all('tr')[1:]
-            data = []
-            headers = ['CIN','Company','RoC','Status']
-            headers.append('URL')
-            for row in rows:
-                cells = row.find_all('td')
-                cin = cells[0].text.strip()
-                company_name_tag = cells[1].find('a')
-                company_name = company_name_tag.text.strip() if company_name_tag else cells[1].text.strip()
-                company_url = company_name_tag['href'] if company_name_tag else ''
-                roc = cells[2].text.strip()
-                status = cells[3].text.strip()
-                data.append([cin, company_name, roc, status, company_url])
-            df = pd.DataFrame(data, columns=headers)
-            df_json = df.to_json(orient='records')
-            return df_json
-        else:    
-            trial = 3
-            while 1:
-                log("1")
-                sn = request.json.get('SN')
-                html_content = fetch_html(url)
-                dict= {}
-                dict["SN"] = sn
-                soup = BeautifulSoup(html_content, 'html.parser')
-                target_div = soup.find('h4', string="Company Details")
-                if target_div:
-                    parent_div = target_div.find_parent('div', class_="col-lg-12 col-md-12 col-sm-12 col-xs-12")
-                    if parent_div:
-                        table = parent_div.find('table')
-                        if table:
-                            table_data = extractCompanyDetails(table)
-                            for row in table_data:
-                                key, value = row
-                                dict[key] = value
-    
-                log("2")
-    
-                target_div = soup.find('h4', string=lambda text: 'Share Capital & Number of Employees' in text)
-                if target_div:
-                    parent_div = target_div.find_parent('div', class_="col-lg-12 col-md-12 col-sm-12 col-xs-12")
-                    if parent_div:
-                        table = parent_div.find('table')
-                        if table:
-                            table_data = extractShareCapital(table)
-                            for row in table_data:
-                                key, value = row
-                                dict[key] = value
-    
-    
-                target_div = soup.find('h4', string=lambda text: 'Listing and Annual Compliance Details' in text)
-                if target_div:
-                    parent_div = target_div.find_parent('div', class_="col-lg-12 col-md-12 col-sm-12 col-xs-12")
-                    if parent_div:
-                        table = parent_div.find('table')
-                        if table:
-                            table_data = extractAnnualCompliance(table)
-                            for row in table_data:
-                                key, value = row
-                                dict[key] = value
-                
-                
-                
-                Ason_element = soup.find('div', style="vertical-align: bottom; float:left; width:45%;")
-                as_on_value = None
-                if Ason_element:
-                    b_element = Ason_element.find('b')
-                    if b_element:
-                        full_text = b_element.get_text(strip=True)
-                        if full_text.startswith("As on:"):
-                            as_on_value = full_text.replace("As on:", "").strip()
-                if as_on_value:
-                    dict['As_on'] = as_on_value
-                email_tag = soup.find('a', class_='__cf_email__')
-                email_data = email_tag['data-cfemail'] if email_tag else None
-                ctx = execjs.compile(js_code)
-                email_id = ctx.call("decodeEmail", email_data) if email_data else ""
-                address_tag = soup.find('p', string=lambda text: text and 'Address:' in text)
-                address = address_tag.find_next('p').get_text().strip() if address_tag else ""
-    
-                dict["Email ID"] = email_id
-                dict["Address"] = address
-                dict["Url"] = url
-                rows = soup.find_all('tr', class_='accordion-toggle main-row')
-                data = []
-                for row in rows:
-                    cols = row.find_all('td')
-                    cols = [col.text.strip() for col in cols]
-                    cols.insert(0, sn) 
-                    data.append(cols[:-1])
-                df = pd.DataFrame(data, columns=['SN','DIN', 'Director_Name', 'Designation', 'Appointment_Date'])
-                df_json = df.to_dict(orient='records')
-                log("3")
-                if trial == 0 or ('Company Status' in dict and 'As_on' in dict):
-                    return jsonify({"result_dict": dict, "dataframe": df_json})
-                else:
-                    trial = trial - 1
+        # Initialize all result keys to ensure no missing fields
+        result = {
+            'normal_details': {},
+            # 'alternative_titles': {},
+            # 'credits': {},
+            # 'images': {},
+            # 'keywords': {},
+            # 'videos': {}
+        }
 
+        # Call all functions
+        result.update(get_normal_details(movie_id, token))
+        # result.update(get_alternative_titles(movie_id, token))
+        # result.update(get_credits(movie_id, token))
+        # result.update(get_images(movie_id, token))
+        # result.update(get_keywords(movie_id, token))
+        # result.update(get_videos(movie_id, token))
+        
+        return jsonify(result)
+    
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+
 @app.route('/ping', methods=['GET'])
 def ping():
-    return "Zorojuro!", 200
+    return "chamkila chetan!", 200
 @app.route('/success')
 def home():
     return render_template('index.html')
