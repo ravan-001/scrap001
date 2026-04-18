@@ -6,6 +6,7 @@ import json
 import os
 import base64
 from urllib.parse import urljoin, urlparse
+from playwright.sync_api import sync_playwright
 
 app = Flask(__name__)
 
@@ -205,47 +206,54 @@ def normalize_server_items(server_items):
         'available': False
     }) for key in ['smwh', 'rpmshre', 'upnshr', 'strmp2', 'flls']]
 
-def fetch_html_text(url, session):
-    import os
-    cf_clearance = os.environ.get('CF_CLEARANCE', '').strip()
-    # Session warming: visit home if cookies are empty
-    if not session.cookies:
+def fetch_html_text(url, session, use_playwright=False):
+    # Reverting to Hybrid approach for stability and speed
+    if not use_playwright:
+        print(f"[FETCH] {url} using Requests...", flush=True)
+        headers = {'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'}
         try:
-            home_url = f"{urlparse(url).scheme}://{urlparse(url).hostname}/"
-            print(f"[WARM] Visiting {home_url} to get session cookies...", flush=True)
-            session.get(home_url, headers={'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'}, timeout=10)
-        except: pass
+            response = session.get(url, headers=headers, timeout=15)
+            print(f"[FETCH] SUCCESS: {url} | Status: {response.status_code}", flush=True)
+            return {'response': response, 'html': response.text, 'finalUrl': response.url}
+        except Exception as e:
+            print(f"[FETCH] FAILED: {url} | Error: {e}", flush=True)
+            raise
 
-    headers = {
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'accept-language': 'en-US,en;q=0.9',
-        'accept-encoding': 'gzip, deflate, br, zstd',
-        'cache-control': 'max-age=0',
-        'sec-ch-ua': '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'sec-fetch-dest': 'document',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-site': 'none',
-        'sec-fetch-user': '?1',
-        'upgrade-insecure-requests': '1',
-    }
-    if cf_clearance:
-        headers['cookie'] = f'cf_clearance={cf_clearance}'
-    
-    print(f"[FETCH] {url}...", flush=True)
+    print(f"[FETCH] {url} using Playwright (Cloudflare bypass)...", flush=True)
     try:
-        response = session.get(url, headers=headers, timeout=15)
-        print(f"[FETCH] SUCCESS: {url} | Status: {response.status_code} | Length: {len(response.text)}", flush=True)
-        return {
-            'response': response,
-            'html': response.text,
-            'finalUrl': response.url
-        }
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36')
+            page = context.new_page()
+            response = page.goto(url, wait_until='domcontentloaded', timeout=30000)
+            
+            if "Just a moment" in page.title() or "Verify you are human" in page.content():
+                print("[FETCH] Challenge detected, waiting...", flush=True)
+                page.wait_for_timeout(5000)
+            
+            html = page.content()
+            final_url = page.url
+            status = response.status if response else 0
+            browser.close()
+            
+            class MockResponse:
+                def __init__(self, status, ok, url, text):
+                    self.status_code = status
+                    self.ok = ok
+                    self.url = url
+                    self.text = text
+            
+            return {
+                'response': MockResponse(status, status < 400, final_url, html),
+                'html': html,
+                'finalUrl': final_url
+            }
     except Exception as e:
-        print(f"[FETCH] FAILED: {url} | Error: {e}")
+        print(f"[FETCH] Playwright FAILED: {url} | Error: {e}", flush=True)
         raise
+
+# I will update the main scrape function to pass the playwright instance
+
 
 
 KNOWN_PROVIDER_HOSTS = [
@@ -385,7 +393,7 @@ def resolve_servers_from_player_page(embed_url, html, session, logger, depth=0, 
     nested = [u for u in extract_embed_urls(html, embed_url) if u and u != embed_url and not any(h in u for h in ['youtube.com', 'youtu.be'])]
     for nu in nested[:3]:
         try:
-            r = fetch_html_text(nu, session)
+            r = fetch_html_text(nu, session, use_playwright=False)
             if r['response'].ok:
                 push_servers(resolve_servers_from_player_page(r['finalUrl'] or nu, r['html'], session, logger, depth + 1, visited))
         except Exception as e: logger(f'[nested] {nu}: {e}')
@@ -394,7 +402,7 @@ def resolve_servers_from_player_page(embed_url, html, session, logger, depth=0, 
         loose = [u for u in extract_loose_helper_urls(html, embed_url) if u != embed_url]
         for lu in loose[:4]:
             try:
-                r = fetch_html_text(lu, session)
+                r = fetch_html_text(lu, session, use_playwright=False)
                 if r['response'].ok:
                     push_servers(resolve_servers_from_player_page(r['finalUrl'] or lu, r['html'], session, logger, depth + 1, visited))
             except Exception as e: logger(f'[loose] {lu}: {e}')
@@ -404,7 +412,7 @@ def resolve_servers_from_player_page(embed_url, html, session, logger, depth=0, 
             evid_results = fetch_iq_smart_games_evid_urls(embed_url, html, session, logger)
             for item in evid_results[:5]:
                 try:
-                    r = fetch_html_text(item['url'], session)
+                    r = fetch_html_text(item['url'], session, use_playwright=False)
                     if r['response'].ok:
                         push_servers(resolve_servers_from_player_page(r['finalUrl'] or item['url'], r['html'], session, logger, depth + 1, visited))
                 except Exception as e: logger(f'[evid] {item["url"]}: {e}')
@@ -415,7 +423,7 @@ def resolve_servers_from_player_page(embed_url, html, session, logger, depth=0, 
         candidates = create_download_url_candidates(embed_url, helper_sid)
         for cu in [c for c in candidates if 'ddn.iqsmartgames.com/file/' in c][:2]:
             try:
-                r = fetch_html_text(cu, session)
+                r = fetch_html_text(cu, session, use_playwright=False)
                 if r['response'].ok:
                     push_servers(resolve_servers_from_player_page(r['finalUrl'] or cu, r['html'], session, logger, depth + 1, visited))
             except Exception as e: logger(f'[ddn_candidate] {cu}: {e}')
@@ -477,43 +485,34 @@ def scrape_from_page(html, page_url, session):
     print(f"[SCRAPE] Starting on: {page_url}", flush=True)
     logger = lambda *args: print(f"[SCRAPE] {args[0] if args else ''}", flush=True)
     static_embed_urls = extract_embed_urls(html, page_url)
-    print(f"[SCRAPE] Found {len(static_embed_urls)} static embed URLs", flush=True)
-    
     ajax_embed_urls = fetch_ajax_embed_urls(html, page_url, session, logger)
-    print(f"[SCRAPE] Found {len(ajax_embed_urls)} AJAX embed URLs", flush=True)
-    
     embed_urls = unique_strings(static_embed_urls + ajax_embed_urls)
+    
     direct_servers = extract_server_items(html, page_url)
-    print(f"[SCRAPE] Direct servers found: {len([s for s in direct_servers if s.get('available')])}", flush=True)
     player_results = []
     if any(s.get('available') for s in direct_servers):
-        player_results.append({
-            'playerUrl': page_url,
-            'servers': direct_servers
-        })
+        player_results.append({'playerUrl': page_url, 'servers': direct_servers})
+    
     recovered_downloads = extract_download_urls(html, page_url)
+    
     for embed_url in embed_urls:
         try:
             print(f"[SCRAPE] Processing embed: {embed_url}", flush=True)
-            result = fetch_html_text(embed_url, session)
+            # Use Requests for embeds as they are usually not protected by Cloudflare JS challenge
+            result = fetch_html_text(embed_url, session, use_playwright=False)
             effective_url = result['finalUrl'] or embed_url
-            helper_sid = extract_helper_sid(result['html'])
             
-            recovered_downloads.extend(create_download_url_candidates(effective_url, helper_sid))
-            recovered_downloads.extend(extract_download_urls(result['html'], effective_url))
-            
-            if not result['response'].ok:
-                print(f"[SCRAPE] Embed response not OK: {result['response'].status_code}", flush=True)
-                continue
-                
             servers = resolve_servers_from_player_page(effective_url, result['html'], session, logger)
             avail_count = len([s for s in servers if s.get('available')])
             print(f"[SCRAPE] Embed {embed_url} yielded {avail_count} servers", flush=True)
             
             if avail_count > 0:
                 player_results.append({'playerUrl': effective_url, 'servers': servers})
+            
+            recovered_downloads.extend(extract_download_urls(result['html'], effective_url))
         except Exception as e:
             print(f'[SCRAPE] ERROR on embed {embed_url}: {e}', flush=True)
+
     all_servers = normalize_server_items([s for p in player_results for s in p.get('servers', []) if s.get('available') and s.get('url')])
     return {
         'embedUrls': embed_urls,
@@ -531,17 +530,13 @@ def scrape():
         return jsonify({'error': 'No url provided'}), 400
     try:
         session = requests.Session()
-        result = fetch_html_text(url, session)
+        # Use Playwright for the main page to bypass Cloudflare
+        result = fetch_html_text(url, session, use_playwright=True)
+        
         if not result['response'].ok:
             return jsonify({'error': f'Failed to fetch page: {result["response"].status_code}'}), 400
         
         print(f"[scrape] Fetched URL: {url}", flush=True)
-        print(f"[scrape] HTML length: {len(result['html'])}", flush=True)
-        # Safe print for Windows console
-        snippet = result['html'][:500].encode('ascii', 'ignore').decode('ascii')
-        print(f"[scrape] HTML snippet: {snippet}", flush=True)
-        print(f"[scrape] HTML snippet (ascii): {snippet}")
-        
         scraped = scrape_from_page(result['html'], url, session)
         return jsonify(scraped)
     except Exception as e:
