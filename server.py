@@ -71,7 +71,8 @@ def _run_playwright_fetch(url):
         )
         page = context.new_page()
         page.route('**/*.{png,jpg,jpeg,gif,svg,webp,woff,woff2,ttf,mp4,mp3}', lambda route: route.abort())
-        response = page.goto(url, wait_until='load', timeout=20000)
+        response = page.goto(url, wait_until='domcontentloaded', timeout=20000)
+
         t_nav = time.time() - t0
         print(f"[FETCH] Navigation done ({t_nav:.2f}s)", flush=True)
 
@@ -106,6 +107,8 @@ def _run_playwright_fetch(url):
             # None of the selectors found, give JS a moment to render
             page.wait_for_timeout(1500)
             print(f"[FETCH] No content selector found, waited 1.5s fallback", flush=True)
+
+        html = page.content()
 
         # --- New: In-Browser AJAX Extraction ---
         ajax_embed_urls = []
@@ -152,7 +155,6 @@ def _run_playwright_fetch(url):
         except Exception as ajax_e:
             print(f"[FETCH] In-browser AJAX failed: {ajax_e}", flush=True)
 
-        html = page.content()
         final_url = page.url
         status = response.status if response else 0
         cookies = context.cookies()
@@ -161,6 +163,7 @@ def _run_playwright_fetch(url):
         elapsed = time.time() - t0
         print(f"[FETCH] Playwright done {url} -> {status} ({elapsed:.2f}s, html={len(html)} chars)", flush=True)
         return html, final_url, status, cookies, ajax_embed_urls
+
     except Exception as e:
 
         # Clean up context on failure
@@ -608,8 +611,10 @@ def _process_single_embed(embed_url, session, logger):
     """Process one embed URL — returns (player_result, downloads) or None."""
     t0 = time.time()
     try:
-        # If the embed is also likely protected (e.g. gdmirrorbot), use Playwright
-        use_pw = any(h in embed_url for h in ['gdmirrorbot', 'multimovies', 'rpmhub', 'smoothpre'])
+        # domains known to have Cloudflare protection or IP blocking on Render
+        cf_domains = ['gdmirrorbot', 'multimovies', 'rpmhub', 'smoothpre', 'iqsmartgames']
+        use_pw = any(h in embed_url for h in cf_domains)
+
         
         result = fetch_html_text(embed_url, session, use_playwright=use_pw)
         effective_url = result['finalUrl'] or embed_url
