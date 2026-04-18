@@ -1,4 +1,3 @@
-Flask==2.0.1
+Flask
 requests
-Werkzeug==2.0.1
 gunicorn
