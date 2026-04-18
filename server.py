@@ -208,14 +208,21 @@ def normalize_server_items(server_items):
 def fetch_html_text(url, session):
     import os
     cf_clearance = os.environ.get('CF_CLEARANCE', '').strip()
+    # Session warming: visit home if cookies are empty
+    if not session.cookies:
+        try:
+            home_url = f"{urlparse(url).scheme}://{urlparse(url).hostname}/"
+            print(f"[WARM] Visiting {home_url} to get session cookies...", flush=True)
+            session.get(home_url, headers={'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'}, timeout=10)
+        except: pass
+
     headers = {
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'accept-language': 'en-US,en;q=0.9',
-        'accept-encoding': 'gzip, deflate',
-        'cache-control': 'no-cache',
-        'pragma': 'no-cache',
-        'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+        'accept-encoding': 'gzip, deflate, br, zstd',
+        'cache-control': 'max-age=0',
+        'sec-ch-ua': '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
         'sec-ch-ua-mobile': '?0',
         'sec-ch-ua-platform': '"Windows"',
         'sec-fetch-dest': 'document',
@@ -223,7 +230,6 @@ def fetch_html_text(url, session):
         'sec-fetch-site': 'none',
         'sec-fetch-user': '?1',
         'upgrade-insecure-requests': '1',
-        'dnt': '1',
     }
     if cf_clearance:
         headers['cookie'] = f'cf_clearance={cf_clearance}'
