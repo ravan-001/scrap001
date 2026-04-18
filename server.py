@@ -9,6 +9,11 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
+
+# Ensure Playwright finds browsers on Render
+if os.path.isdir('/opt/render'):
+    os.environ.setdefault('PLAYWRIGHT_BROWSERS_PATH', '/opt/render/.cache/ms-playwright')
+
 from playwright.sync_api import sync_playwright
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry

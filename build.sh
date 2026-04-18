@@ -3,4 +3,8 @@
 set -o errexit
 
 pip install -r requirements.txt
-playwright install --with-deps chromium
+
+# Install browser binary only (Render doesn't allow root for system deps)
+# Set browser path explicitly so runtime can find it
+export PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright
+playwright install chromium
