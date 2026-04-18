@@ -5,10 +5,106 @@ import traceback
 import json
 import os
 import base64
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
 from playwright.sync_api import sync_playwright
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 app = Flask(__name__)
+
+# --- Playwright on a dedicated single thread (sync API is not thread-safe) ---
+_pw_local = threading.local()  # thread-local so new threads auto-create fresh state
+
+def _ensure_browser():
+    """Called ONLY on the dedicated PW thread. Auto-recovers if thread respawned."""
+    try:
+        if hasattr(_pw_local, 'browser') and _pw_local.browser.is_connected():
+            return _pw_local.browser
+    except Exception:
+        pass  # browser ref is stale, recreate
+
+    # Clean up any dead state
+    try:
+        if hasattr(_pw_local, 'browser'):
+            _pw_local.browser.close()
+    except Exception:
+        pass
+    try:
+        if hasattr(_pw_local, 'pw'):
+            _pw_local.pw.stop()
+    except Exception:
+        pass
+
+    _pw_local.pw = sync_playwright().start()
+    _pw_local.browser = _pw_local.pw.chromium.launch(
+        headless=True,
+        args=['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage',
+              '--disable-extensions']
+    )
+    print('[BROWSER] Persistent browser launched on PW thread', flush=True)
+    return _pw_local.browser
+
+# Single-thread executor ensures all Playwright calls happen on the SAME thread
+_pw_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='playwright')
+
+def _run_playwright_fetch(url):
+    """Runs entirely on the dedicated Playwright thread."""
+    t0 = time.time()
+    context = None
+    try:
+        browser = _ensure_browser()
+        context = browser.new_context(
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+        )
+        page = context.new_page()
+        page.route('**/*.{png,jpg,jpeg,gif,svg,webp,woff,woff2,ttf,mp4,mp3}', lambda route: route.abort())
+        response = page.goto(url, wait_until='domcontentloaded', timeout=15000)
+        t_nav = time.time() - t0
+        print(f"[FETCH] Navigation done ({t_nav:.2f}s)", flush=True)
+
+        # Smart CF polling: check every 500ms up to 6s
+        title = page.title() or ''
+        if 'just a moment' in title.lower():
+            print(f"[FETCH] CF challenge detected, polling...", flush=True)
+            for i in range(12):
+                page.wait_for_timeout(500)
+                title = page.title() or ''
+                if 'just a moment' not in title.lower():
+                    print(f"[FETCH] CF cleared after {(i+1)*0.5:.1f}s", flush=True)
+                    break
+
+        html = page.content()
+        final_url = page.url
+        status = response.status if response else 0
+        context.close()
+        context = None
+        elapsed = time.time() - t0
+        print(f"[FETCH] Playwright done {url} -> {status} ({elapsed:.2f}s)", flush=True)
+        return html, final_url, status
+    except Exception as e:
+        # Clean up context on failure
+        if context:
+            try: context.close()
+            except: pass
+        print(f"[FETCH] PW thread error, will recreate browser next call: {e}", flush=True)
+        # Force browser recreation on next call
+        try: _pw_local.browser.close()
+        except: pass
+        if hasattr(_pw_local, 'browser'):
+            del _pw_local.browser
+        raise
+
+def _create_fast_session():
+    """Create a requests.Session with connection pooling and retries."""
+    s = requests.Session()
+    retry = Retry(total=2, backoff_factor=0.1, status_forcelist=[502, 503, 504])
+    adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=retry)
+    s.mount('http://', adapter)
+    s.mount('https://', adapter)
+    return s
 
 # Helper functions for scraping
 
@@ -206,53 +302,39 @@ def normalize_server_items(server_items):
         'available': False
     }) for key in ['smwh', 'rpmshre', 'upnshr', 'strmp2', 'flls']]
 
+class MockResponse:
+    def __init__(self, status, ok, url, text):
+        self.status_code = status
+        self.ok = ok
+        self.url = url
+        self.text = text
+
 def fetch_html_text(url, session, use_playwright=False):
-    # Reverting to Hybrid approach for stability and speed
+    t0 = time.time()
     if not use_playwright:
-        print(f"[FETCH] {url} using Requests...", flush=True)
         headers = {'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'}
         try:
-            response = session.get(url, headers=headers, timeout=15)
-            print(f"[FETCH] SUCCESS: {url} | Status: {response.status_code}", flush=True)
+            response = session.get(url, headers=headers, timeout=8)
+            elapsed = time.time() - t0
+            print(f"[FETCH] Requests {url} -> {response.status_code} ({elapsed:.2f}s)", flush=True)
             return {'response': response, 'html': response.text, 'finalUrl': response.url}
         except Exception as e:
-            print(f"[FETCH] FAILED: {url} | Error: {e}", flush=True)
+            print(f"[FETCH] FAILED {url} ({time.time()-t0:.2f}s): {e}", flush=True)
             raise
 
-    print(f"[FETCH] {url} using Playwright (Cloudflare bypass)...", flush=True)
+    print(f"[FETCH] Playwright {url}...", flush=True)
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36')
-            page = context.new_page()
-            response = page.goto(url, wait_until='domcontentloaded', timeout=30000)
-            
-            if "Just a moment" in page.title() or "Verify you are human" in page.content():
-                print("[FETCH] Challenge detected, waiting...", flush=True)
-                page.wait_for_timeout(5000)
-            
-            html = page.content()
-            final_url = page.url
-            status = response.status if response else 0
-            browser.close()
-            
-            class MockResponse:
-                def __init__(self, status, ok, url, text):
-                    self.status_code = status
-                    self.ok = ok
-                    self.url = url
-                    self.text = text
-            
-            return {
-                'response': MockResponse(status, status < 400, final_url, html),
-                'html': html,
-                'finalUrl': final_url
-            }
+        # Submit to the dedicated PW thread and wait for result
+        future = _pw_executor.submit(_run_playwright_fetch, url)
+        html, final_url, status = future.result(timeout=25)
+        return {
+            'response': MockResponse(status, status < 400, final_url, html),
+            'html': html,
+            'finalUrl': final_url
+        }
     except Exception as e:
-        print(f"[FETCH] Playwright FAILED: {url} | Error: {e}", flush=True)
+        print(f"[FETCH] Playwright FAILED {url} ({time.time()-t0:.2f}s): {e}", flush=True)
         raise
-
-# I will update the main scrape function to pass the playwright instance
 
 
 
@@ -481,39 +563,62 @@ def fetch_ajax_embed_urls(page_html, page_url, session, logger):
 
 
 
+def _process_single_embed(embed_url, session, logger):
+    """Process one embed URL — returns (player_result, downloads) or None."""
+    t0 = time.time()
+    try:
+        result = fetch_html_text(embed_url, session, use_playwright=False)
+        effective_url = result['finalUrl'] or embed_url
+        servers = resolve_servers_from_player_page(effective_url, result['html'], session, logger)
+        avail = [s for s in servers if s.get('available')]
+        downloads = extract_download_urls(result['html'], effective_url)
+        elapsed = time.time() - t0
+        print(f"[EMBED] {embed_url} -> {len(avail)} servers ({elapsed:.2f}s)", flush=True)
+        player = {'playerUrl': effective_url, 'servers': servers} if avail else None
+        return player, downloads
+    except Exception as e:
+        print(f"[EMBED] FAIL {embed_url} ({time.time()-t0:.2f}s): {e}", flush=True)
+        return None, []
+
 def scrape_from_page(html, page_url, session):
-    print(f"[SCRAPE] Starting on: {page_url}", flush=True)
+    t_start = time.time()
     logger = lambda *args: print(f"[SCRAPE] {args[0] if args else ''}", flush=True)
+
+    # --- Phase 1: Extract embed URLs (static + ajax concurrently) ---
+    t0 = time.time()
     static_embed_urls = extract_embed_urls(html, page_url)
+    print(f"[TIMING] Static embed extraction: {time.time()-t0:.2f}s -> {len(static_embed_urls)} URLs", flush=True)
+
+    t0 = time.time()
     ajax_embed_urls = fetch_ajax_embed_urls(html, page_url, session, logger)
+    print(f"[TIMING] Ajax embed extraction: {time.time()-t0:.2f}s -> {len(ajax_embed_urls)} URLs", flush=True)
+
     embed_urls = unique_strings(static_embed_urls + ajax_embed_urls)
-    
+    print(f"[TIMING] Total unique embeds: {len(embed_urls)}", flush=True)
+
     direct_servers = extract_server_items(html, page_url)
     player_results = []
     if any(s.get('available') for s in direct_servers):
         player_results.append({'playerUrl': page_url, 'servers': direct_servers})
-    
+
     recovered_downloads = extract_download_urls(html, page_url)
-    
-    for embed_url in embed_urls:
-        try:
-            print(f"[SCRAPE] Processing embed: {embed_url}", flush=True)
-            # Use Requests for embeds as they are usually not protected by Cloudflare JS challenge
-            result = fetch_html_text(embed_url, session, use_playwright=False)
-            effective_url = result['finalUrl'] or embed_url
-            
-            servers = resolve_servers_from_player_page(effective_url, result['html'], session, logger)
-            avail_count = len([s for s in servers if s.get('available')])
-            print(f"[SCRAPE] Embed {embed_url} yielded {avail_count} servers", flush=True)
-            
-            if avail_count > 0:
-                player_results.append({'playerUrl': effective_url, 'servers': servers})
-            
-            recovered_downloads.extend(extract_download_urls(result['html'], effective_url))
-        except Exception as e:
-            print(f'[SCRAPE] ERROR on embed {embed_url}: {e}', flush=True)
+
+    # --- Phase 2: Process ALL embeds concurrently ---
+    t0 = time.time()
+    if embed_urls:
+        with ThreadPoolExecutor(max_workers=min(6, len(embed_urls))) as pool:
+            futures = {pool.submit(_process_single_embed, eu, session, logger): eu for eu in embed_urls}
+            for future in as_completed(futures):
+                player, downloads = future.result()
+                if player:
+                    player_results.append(player)
+                recovered_downloads.extend(downloads)
+    print(f"[TIMING] All embeds processed: {time.time()-t0:.2f}s", flush=True)
 
     all_servers = normalize_server_items([s for p in player_results for s in p.get('servers', []) if s.get('available') and s.get('url')])
+    total = time.time() - t_start
+    avail = len([s for s in all_servers if s.get('available')])
+    print(f"[TIMING] scrape_from_page total: {total:.2f}s | {avail} servers found", flush=True)
     return {
         'embedUrls': embed_urls,
         'servers': all_servers,
@@ -524,24 +629,36 @@ def scrape_from_page(html, page_url, session):
 
 @app.route('/scrape', methods=['POST'])
 def scrape():
-    print("[SERVER] Scrape request received!", flush=True)
+    t_total = time.time()
+    print(f"\n{'='*60}", flush=True)
+    print(f"[SERVER] Scrape request received at {time.strftime('%H:%M:%S')}", flush=True)
     url = request.json.get('url')
     if not url:
         return jsonify({'error': 'No url provided'}), 400
     try:
-        session = requests.Session()
-        # Use Playwright for the main page to bypass Cloudflare
+        session = _create_fast_session()
+
+        # Phase 1: Fetch main page with Playwright
+        t0 = time.time()
         result = fetch_html_text(url, session, use_playwright=True)
-        
+        print(f"[TIMING] Main page fetch: {time.time()-t0:.2f}s", flush=True)
+
         if not result['response'].ok:
             return jsonify({'error': f'Failed to fetch page: {result["response"].status_code}'}), 400
-        
-        print(f"[scrape] Fetched URL: {url}", flush=True)
+
+        # Phase 2: Scrape embeds & servers
+        t0 = time.time()
         scraped = scrape_from_page(result['html'], url, session)
+        print(f"[TIMING] Scrape processing: {time.time()-t0:.2f}s", flush=True)
+
+        total = time.time() - t_total
+        avail = len([s for s in scraped.get('servers', []) if s.get('available')])
+        print(f"[TIMING] === TOTAL REQUEST: {total:.2f}s | {avail} servers ===", flush=True)
+        print(f"{'='*60}\n", flush=True)
         return jsonify(scraped)
     except Exception as e:
         tb = traceback.format_exc()
-        print('[scrape] exception:', tb)
+        print(f'[scrape] exception ({time.time()-t_total:.2f}s):', tb)
         return jsonify({'error': str(e), 'traceback': tb}), 500
 
 
