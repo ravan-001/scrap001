@@ -10,9 +10,10 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
 
-# Ensure Playwright finds browsers on Render
-if os.path.isdir('/opt/render'):
-    os.environ.setdefault('PLAYWRIGHT_BROWSERS_PATH', '/opt/render/.cache/ms-playwright')
+# Ensure Playwright finds browsers (project-local dir from build.sh)
+_proj_browsers = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pw-browsers')
+if os.path.isdir(_proj_browsers):
+    os.environ['PLAYWRIGHT_BROWSERS_PATH'] = _proj_browsers
 
 from playwright.sync_api import sync_playwright
 from requests.adapters import HTTPAdapter
