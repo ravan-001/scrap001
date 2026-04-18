@@ -21,6 +21,10 @@ from urllib3.util.retry import Retry
 
 app = Flask(__name__)
 
+# --- Configuration ---
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+
+
 # --- Playwright on a dedicated single thread (sync API is not thread-safe) ---
 _pw_local = threading.local()  # thread-local so new threads auto-create fresh state
 
@@ -63,7 +67,7 @@ def _run_playwright_fetch(url):
     try:
         browser = _ensure_browser()
         context = browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+            user_agent=USER_AGENT
         )
         page = context.new_page()
         page.route('**/*.{png,jpg,jpeg,gif,svg,webp,woff,woff2,ttf,mp4,mp3}', lambda route: route.abort())
@@ -81,6 +85,7 @@ def _run_playwright_fetch(url):
                 if 'just a moment' not in title.lower():
                     print(f"[FETCH] CF cleared after {(i+1)*0.5:.1f}s", flush=True)
                     break
+
 
         # Wait for JS to render dynamic content (player options, iframes, embeds)
         content_selectors = [
@@ -340,15 +345,17 @@ class MockResponse:
 def fetch_html_text(url, session, use_playwright=False):
     t0 = time.time()
     if not use_playwright:
-        headers = {'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'}
+        headers = {'user-agent': USER_AGENT}
         try:
-            response = session.get(url, headers=headers, timeout=8)
+            response = session.get(url, headers=headers, timeout=10)
             elapsed = time.time() - t0
-            print(f"[FETCH] Requests {url} -> {response.status_code} ({elapsed:.2f}s)", flush=True)
+            snippet = (response.text[:200] + '...') if response.text else 'EMPTY'
+            print(f"[FETCH] Requests {url} -> {response.status_code} ({elapsed:.2f}s) | Snippet: {snippet}", flush=True)
             return {'response': response, 'html': response.text, 'finalUrl': response.url}
         except Exception as e:
             print(f"[FETCH] FAILED {url} ({time.time()-t0:.2f}s): {e}", flush=True)
             raise
+
 
     print(f"[FETCH] Playwright {url}...", flush=True)
     try:
@@ -574,12 +581,22 @@ def fetch_ajax_embed_urls(page_html, page_url, session, logger):
                 'action': 'doo_player_ajax', 'post': opt['post'],
                 'nume': opt['nume'], 'type': opt['type']
             }, headers={
-                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'user-agent': USER_AGENT,
                 'accept': 'application/json, text/plain, */*',
                 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
                 'origin': origin, 'referer': page_url, 'x-requested-with': 'XMLHttpRequest'
             }, timeout=10)
-            payload = resp.json()
+            
+            if not resp.ok:
+                logger(f"[ajax] {opt} HTTP Error: {resp.status_code} | Body: {resp.text[:200]}")
+                continue
+                
+            try:
+                payload = resp.json()
+            except Exception as json_err:
+                logger(f"[ajax] {opt} JSON Error: {json_err} | Body: {resp.text[:500]}")
+                continue
+
             raw_embed = (payload.get('embed_url') or '').strip()
             if not raw_embed or 'youtube' in raw_embed or str(payload.get('type','')).lower() == 'trailer':
                 continue
@@ -686,11 +703,16 @@ def scrape():
         scraped = scrape_from_page(result['html'], url, session)
         print(f"[TIMING] Scrape processing: {time.time()-t0:.2f}s", flush=True)
 
+        # Include HTML for debugging
+        scraped['debugHtml'] = result['html']
+        scraped['debugSnippet'] = result['html'][:1000]
+
         total = time.time() - t_total
         avail = len([s for s in scraped.get('servers', []) if s.get('available')])
         print(f"[TIMING] === TOTAL REQUEST: {total:.2f}s | {avail} servers ===", flush=True)
         print(f"{'='*60}\n", flush=True)
         return jsonify(scraped)
+
     except Exception as e:
         tb = traceback.format_exc()
         print(f'[scrape] exception ({time.time()-t_total:.2f}s):', tb)
