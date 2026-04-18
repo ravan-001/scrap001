@@ -67,29 +67,51 @@ def _run_playwright_fetch(url):
         )
         page = context.new_page()
         page.route('**/*.{png,jpg,jpeg,gif,svg,webp,woff,woff2,ttf,mp4,mp3}', lambda route: route.abort())
-        response = page.goto(url, wait_until='domcontentloaded', timeout=15000)
+        response = page.goto(url, wait_until='load', timeout=20000)
         t_nav = time.time() - t0
         print(f"[FETCH] Navigation done ({t_nav:.2f}s)", flush=True)
 
-        # Smart CF polling: check every 500ms up to 6s
+        # Smart CF polling: check every 500ms up to 8s
         title = page.title() or ''
         if 'just a moment' in title.lower():
             print(f"[FETCH] CF challenge detected, polling...", flush=True)
-            for i in range(12):
+            for i in range(16):
                 page.wait_for_timeout(500)
                 title = page.title() or ''
                 if 'just a moment' not in title.lower():
                     print(f"[FETCH] CF cleared after {(i+1)*0.5:.1f}s", flush=True)
                     break
 
+        # Wait for JS to render dynamic content (player options, iframes, embeds)
+        content_selectors = [
+            'li.dooplay_player_option',  # player option buttons
+            'iframe[src]',               # embedded player iframe
+            '#player',                   # player container
+            '.source-box',              # source links
+        ]
+        t_wait = time.time()
+        for sel in content_selectors:
+            try:
+                page.wait_for_selector(sel, timeout=3000)
+                print(f"[FETCH] Content ready: found '{sel}' ({time.time()-t_wait:.2f}s)", flush=True)
+                break
+            except:
+                continue
+        else:
+            # None of the selectors found, give JS a moment to render
+            page.wait_for_timeout(1500)
+            print(f"[FETCH] No content selector found, waited 1.5s fallback", flush=True)
+
         html = page.content()
         final_url = page.url
         status = response.status if response else 0
+        # Extract cookies for the requests session (CF bypass cookies)
+        cookies = context.cookies()
         context.close()
         context = None
         elapsed = time.time() - t0
-        print(f"[FETCH] Playwright done {url} -> {status} ({elapsed:.2f}s)", flush=True)
-        return html, final_url, status
+        print(f"[FETCH] Playwright done {url} -> {status} ({elapsed:.2f}s, html={len(html)} chars, cookies={len(cookies)})", flush=True)
+        return html, final_url, status, cookies
     except Exception as e:
         # Clean up context on failure
         if context:
@@ -332,11 +354,12 @@ def fetch_html_text(url, session, use_playwright=False):
     try:
         # Submit to the dedicated PW thread and wait for result
         future = _pw_executor.submit(_run_playwright_fetch, url)
-        html, final_url, status = future.result(timeout=25)
+        html, final_url, status, cookies = future.result(timeout=30)
         return {
             'response': MockResponse(status, status < 400, final_url, html),
             'html': html,
-            'finalUrl': final_url
+            'finalUrl': final_url,
+            'cookies': cookies
         }
     except Exception as e:
         print(f"[FETCH] Playwright FAILED {url} ({time.time()-t0:.2f}s): {e}", flush=True)
@@ -651,6 +674,12 @@ def scrape():
 
         if not result['response'].ok:
             return jsonify({'error': f'Failed to fetch page: {result["response"].status_code}'}), 400
+
+        # Transfer Playwright cookies to requests session (CF bypass)
+        pw_cookies = result.get('cookies', [])
+        for c in pw_cookies:
+            session.cookies.set(c['name'], c['value'], domain=c.get('domain', ''))
+        print(f"[COOKIES] Transferred {len(pw_cookies)} cookies to session", flush=True)
 
         # Phase 2: Scrape embeds & servers
         t0 = time.time()
