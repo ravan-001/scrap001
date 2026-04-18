@@ -107,17 +107,62 @@ def _run_playwright_fetch(url):
             page.wait_for_timeout(1500)
             print(f"[FETCH] No content selector found, waited 1.5s fallback", flush=True)
 
+        # --- New: In-Browser AJAX Extraction ---
+        ajax_embed_urls = []
+        try:
+            # Extract the config needed for AJAX
+            dt_match = re.search(r'var\s+dtAjax\s*=\s*(\{[\s\S]*?\})\s*;', html, re.I)
+            if dt_match:
+                ajax_config = json.loads(dt_match.group(1))
+                ajax_url = ajax_config.get('url')
+                
+                # Find the player options
+                options = []
+                for tag in re.findall(r'<li\b[^>]*class=["\'][^"\']*dooplay_player_option[^"\']*["\'][^>]*>', html, re.I):
+                    p = re.search(r'data-post=["\']([^"\']+)["\']', tag, re.I)
+                    n = re.search(r'data-nume=["\']([^"\']+)["\']', tag, re.I)
+                    t = re.search(r'data-type=["\']([^"\']+)["\']', tag, re.I)
+                    if p and n and t:
+                        options.append({'post': p.group(1), 'nume': n.group(1), 'type': t.group(1)})
+                
+                if options and ajax_url:
+                    print(f"[FETCH] Attempting {len(options)} in-browser AJAX calls...", flush=True)
+                    # Run the AJAX calls INSIDE the browser to bypass CF
+                    ajax_results = page.evaluate("""
+                        async (args) => {
+                            const { url, options } = args;
+                            const results = [];
+                            for (const opt of options) {
+                                if (opt.nume.toLowerCase() === 'trailer') continue;
+                                try {
+                                    const resp = await fetch(url, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
+                                        body: `action=doo_player_ajax&post=${opt.post}&nume=${opt.nume}&type=${opt.type}`
+                                    });
+                                    const json = await resp.json();
+                                    if (json.embed_url) results.push(json.embed_url);
+                                } catch (e) {}
+                            }
+                            return results;
+                        }
+                    """, {'url': ajax_url, 'options': options})
+                    ajax_embed_urls = ajax_results
+                    print(f"[FETCH] In-browser AJAX found {len(ajax_embed_urls)} URLs", flush=True)
+        except Exception as ajax_e:
+            print(f"[FETCH] In-browser AJAX failed: {ajax_e}", flush=True)
+
         html = page.content()
         final_url = page.url
         status = response.status if response else 0
-        # Extract cookies for the requests session (CF bypass cookies)
         cookies = context.cookies()
         context.close()
         context = None
         elapsed = time.time() - t0
-        print(f"[FETCH] Playwright done {url} -> {status} ({elapsed:.2f}s, html={len(html)} chars, cookies={len(cookies)})", flush=True)
-        return html, final_url, status, cookies
+        print(f"[FETCH] Playwright done {url} -> {status} ({elapsed:.2f}s, html={len(html)} chars)", flush=True)
+        return html, final_url, status, cookies, ajax_embed_urls
     except Exception as e:
+
         # Clean up context on failure
         if context:
             try: context.close()
@@ -361,16 +406,18 @@ def fetch_html_text(url, session, use_playwright=False):
     try:
         # Submit to the dedicated PW thread and wait for result
         future = _pw_executor.submit(_run_playwright_fetch, url)
-        html, final_url, status, cookies = future.result(timeout=30)
+        html, final_url, status, cookies, ajax_embed_urls = future.result(timeout=40)
         return {
             'response': MockResponse(status, status < 400, final_url, html),
             'html': html,
             'finalUrl': final_url,
-            'cookies': cookies
+            'cookies': cookies,
+            'ajax_embed_urls': ajax_embed_urls
         }
     except Exception as e:
         print(f"[FETCH] Playwright FAILED {url} ({time.time()-t0:.2f}s): {e}", flush=True)
         raise
+
 
 
 
@@ -551,61 +598,9 @@ def resolve_servers_from_player_page(embed_url, html, session, logger, depth=0, 
     return normalize_server_items(collected_servers)
 
 def fetch_ajax_embed_urls(page_html, page_url, session, logger):
+    # This is now handled inside fetch_html_text via browser evaluate
+    return []
 
-    dt_match = re.search(r'var\s+dtAjax\s*=\s*(\{[\s\S]*?\})\s*;', page_html, re.I)
-    if not dt_match:
-        return []
-    try:
-        config = json.loads(dt_match.group(1))
-    except:
-        return []
-    ajax_url = config.get('url', '')
-    if not ajax_url or config.get('play_method', '').strip().lower() != 'admin_ajax':
-        return []
-    ajax_url = absolute_url(ajax_url, page_url)
-    parsed_page = urlparse(page_url)
-    origin = f'{parsed_page.scheme}://{parsed_page.hostname}'
-    options = []
-    for tag in re.findall(r'<li\b[^>]*class=["\'][^"\']*dooplay_player_option[^"\']*["\'][^>]*>', page_html, re.I):
-        p = re.search(r'data-post=["\']([^"\']+)["\']', tag, re.I)
-        n = re.search(r'data-nume=["\']([^"\']+)["\']', tag, re.I)
-        t = re.search(r'data-type=["\']([^"\']+)["\']', tag, re.I)
-        if p and n and t:
-            options.append({'post': p.group(1), 'nume': n.group(1), 'type': t.group(1)})
-    embed_urls = []
-    for opt in options:
-        if opt['nume'].lower() == 'trailer':
-            continue
-        try:
-            resp = session.post(ajax_url, data={
-                'action': 'doo_player_ajax', 'post': opt['post'],
-                'nume': opt['nume'], 'type': opt['type']
-            }, headers={
-                'user-agent': USER_AGENT,
-                'accept': 'application/json, text/plain, */*',
-                'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                'origin': origin, 'referer': page_url, 'x-requested-with': 'XMLHttpRequest'
-            }, timeout=10)
-            
-            if not resp.ok:
-                logger(f"[ajax] {opt} HTTP Error: {resp.status_code} | Body: {resp.text[:200]}")
-                continue
-                
-            try:
-                payload = resp.json()
-            except Exception as json_err:
-                logger(f"[ajax] {opt} JSON Error: {json_err} | Body: {resp.text[:500]}")
-                continue
-
-            raw_embed = (payload.get('embed_url') or '').strip()
-            if not raw_embed or 'youtube' in raw_embed or str(payload.get('type','')).lower() == 'trailer':
-                continue
-            url = absolute_url(raw_embed, page_url)
-            if url:
-                embed_urls.append(url)
-        except Exception as e:
-            logger(f'[ajax] {opt}: {e}')
-    return unique_strings(embed_urls)
 
 
 
@@ -613,34 +608,31 @@ def _process_single_embed(embed_url, session, logger):
     """Process one embed URL — returns (player_result, downloads) or None."""
     t0 = time.time()
     try:
-        result = fetch_html_text(embed_url, session, use_playwright=False)
+        # If the embed is also likely protected (e.g. gdmirrorbot), use Playwright
+        use_pw = any(h in embed_url for h in ['gdmirrorbot', 'multimovies', 'rpmhub', 'smoothpre'])
+        
+        result = fetch_html_text(embed_url, session, use_playwright=use_pw)
         effective_url = result['finalUrl'] or embed_url
         servers = resolve_servers_from_player_page(effective_url, result['html'], session, logger)
         avail = [s for s in servers if s.get('available')]
         downloads = extract_download_urls(result['html'], effective_url)
         elapsed = time.time() - t0
-        print(f"[EMBED] {embed_url} -> {len(avail)} servers ({elapsed:.2f}s)", flush=True)
+        print(f"[EMBED] {embed_url} (pw={use_pw}) -> {len(avail)} servers ({elapsed:.2f}s)", flush=True)
         player = {'playerUrl': effective_url, 'servers': servers} if avail else None
         return player, downloads
     except Exception as e:
         print(f"[EMBED] FAIL {embed_url} ({time.time()-t0:.2f}s): {e}", flush=True)
         return None, []
 
-def scrape_from_page(html, page_url, session):
+def scrape_from_page(html, page_url, session, ajax_urls=None):
     t_start = time.time()
     logger = lambda *args: print(f"[SCRAPE] {args[0] if args else ''}", flush=True)
 
-    # --- Phase 1: Extract embed URLs (static + ajax concurrently) ---
-    t0 = time.time()
+    # --- Phase 1: Extract embed URLs ---
     static_embed_urls = extract_embed_urls(html, page_url)
-    print(f"[TIMING] Static embed extraction: {time.time()-t0:.2f}s -> {len(static_embed_urls)} URLs", flush=True)
-
-    t0 = time.time()
-    ajax_embed_urls = fetch_ajax_embed_urls(html, page_url, session, logger)
-    print(f"[TIMING] Ajax embed extraction: {time.time()-t0:.2f}s -> {len(ajax_embed_urls)} URLs", flush=True)
-
-    embed_urls = unique_strings(static_embed_urls + ajax_embed_urls)
+    embed_urls = unique_strings(static_embed_urls + (ajax_urls or []))
     print(f"[TIMING] Total unique embeds: {len(embed_urls)}", flush=True)
+
 
     direct_servers = extract_server_items(html, page_url)
     player_results = []
@@ -700,8 +692,9 @@ def scrape():
 
         # Phase 2: Scrape embeds & servers
         t0 = time.time()
-        scraped = scrape_from_page(result['html'], url, session)
+        scraped = scrape_from_page(result['html'], url, session, ajax_urls=result.get('ajax_embed_urls'))
         print(f"[TIMING] Scrape processing: {time.time()-t0:.2f}s", flush=True)
+
 
         # Include HTML for debugging
         scraped['debugHtml'] = result['html']
